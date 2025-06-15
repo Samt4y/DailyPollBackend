@@ -1,0 +1,6 @@
+{
+  "question": "What is the capital of Scotland?",
+  "options": ["Edinburgh", "Glasgow", "Aberdeen", "Dundee"],
+  "correctAnswer": "Edinburgh",
+  "votes": {}
+}
