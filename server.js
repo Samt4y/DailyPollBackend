@@ -1,14 +1,15 @@
 const express = require('express');
+const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
-const cors = require('cors');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-const POLL_FILE = path.join(__dirname, 'poll.json');
-const USERS_FILE = path.join(__dirname, 'users.json');
+const DATA_DIR = path.join(__dirname, 'data');
+const POLL_FILE = path.join(DATA_DIR, 'poll.json');
+const USER_FILE = path.join(DATA_DIR, 'user.json');
 
 function readJson(file) {
   try {
@@ -23,62 +24,92 @@ function writeJson(file, data) {
 }
 
 app.get('/api/poll', (req, res) => {
-  const pollData = readJson(POLL_FILE);
-  if (!pollData) {
-    return res.status(500).json({ error: 'Poll data missing' });
+  const poll = readJson(POLL_FILE);
+  if (!poll) return res.json({ error: 'Poll data missing' });
+
+  // Example: Add pollEndTimestamp, e.g. 24h from poll start or fixed time
+  // For demo, assume poll has pollEndTimestamp in ISO string already:
+  if (!poll.pollEndTimestamp) {
+    // For example, set poll end to tomorrow noon UTC if missing
+    const now = new Date();
+    const tomorrowNoon = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1, 12, 0, 0));
+    poll.pollEndTimestamp = tomorrowNoon.toISOString();
   }
-  // Ensure votes exists
-  if (!pollData.votes) pollData.votes = {};
-  res.json(pollData);
+
+  // Send question, options, and pollEndTimestamp to client
+  res.json({
+    question: poll.question,
+    options: poll.options,
+    pollEndTimestamp: poll.pollEndTimestamp,
+  });
 });
 
 app.post('/api/vote', (req, res) => {
-  const { username, choice } = req.body;
-  if (!username || !choice) {
-    return res.status(400).json({ error: 'Missing username or choice' });
+  const { username, vote } = req.body;
+  if (!username || !vote) return res.status(400).json({ error: 'Missing username or vote' });
+
+  const poll = readJson(POLL_FILE);
+  if (!poll) return res.status(500).json({ error: 'Poll data missing' });
+
+  let users = readJson(USER_FILE) || {};
+
+  // Initialize user if not exists
+  if (!users[username]) {
+    users[username] = { gems: 0, votes: {} };
   }
 
-  const pollData = readJson(POLL_FILE);
-  if (!pollData) return res.status(500).json({ error: 'Poll data missing' });
-  if (!pollData.options.includes(choice)) {
-    return res.status(400).json({ error: 'Invalid choice' });
+  // Check if user already voted today (assuming poll date is unique)
+  const pollDate = poll.pollDate || new Date().toISOString().slice(0, 10);
+  if (users[username].votes[pollDate]) {
+    return res.json({ error: 'You have already voted today' });
   }
 
-  pollData.votes = pollData.votes || {};
-  pollData.votes[choice] = (pollData.votes[choice] || 0) + 1;
-  writeJson(POLL_FILE, pollData);
+  // Record vote
+  users[username].votes[pollDate] = vote;
 
-  let users = readJson(USERS_FILE) || {};
-  if (!users[username]) users[username] = { gems: 0 };
+  // Count votes from all users
+  let results = {};
+  for (const u in users) {
+    const userVote = users[u].votes[pollDate];
+    if (userVote) {
+      results[userVote] = (results[userVote] || 0) + 1;
+    }
+  }
 
-  // Reward gems for correct answer
-  if (choice === pollData.correctAnswer) {
+  // Check correctness
+  const correct = (vote === poll.correctAnswer);
+
+  // Award gems if correct and only once per poll
+  if (correct) {
     users[username].gems += 10;
   }
-  writeJson(USERS_FILE, users);
 
-  // Calculate percentages
-  const totalVotes = Object.values(pollData.votes).reduce((a, b) => a + b, 0);
-  const results = {};
-  for (const option of pollData.options) {
-    const count = pollData.votes[option] || 0;
-    results[option] = totalVotes === 0 ? 0 : (count / totalVotes) * 100;
-  }
+  // Save users back
+  writeJson(USER_FILE, users);
 
-  res.json({ results, gems: users[username].gems });
+  res.json({
+    correct,
+    results,
+  });
 });
 
+// Leaderboard endpoint
 app.get('/api/leaderboard', (req, res) => {
-  const users = readJson(USERS_FILE) || {};
-  const leaderboard = Object.entries(users)
-    .map(([username, data]) => ({ username, gems: data.gems }))
+  const users = readJson(USER_FILE) || {};
+  // Sort by gems desc
+  const sorted = Object.entries(users)
+    .map(([username, data]) => ({ username, gems: data.gems || 0 }))
     .sort((a, b) => b.gems - a.gems);
-  res.json(leaderboard);
+  res.json(sorted.reduce((obj, item) => {
+    obj[item.username] = { gems: item.gems };
+    return obj;
+  }, {}));
 });
 
-app.post('/api/reset', (req, res) => {
-  writeJson(USERS_FILE, {});
-  res.json({ message: 'Leaderboard reset' });
+// Reset leaderboard (clear users.json)
+app.post('/api/reset-leaderboard', (req, res) => {
+  writeJson(USER_FILE, {});
+  res.json({ status: 'Leaderboard reset' });
 });
 
 const PORT = process.env.PORT || 3000;
